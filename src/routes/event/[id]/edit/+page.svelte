@@ -1,8 +1,9 @@
 <script lang="ts">
-	import type { CreateEventData, EventType, LocationType } from '$lib/types';
+	import type { CreateEventData, EventType, LocationType, SectionInput } from '$lib/types';
 	import { enhance } from '$app/forms';
 	import { goto } from '$app/navigation';
 	import { t } from '$lib/i18n/i18n.js';
+	import SectionsEditor from '$lib/components/SectionsEditor.svelte';
 
 	export let data;
 	export let form;
@@ -18,6 +19,10 @@
 		attendee_limit: data.event.attendeeLimit || undefined,
 		visibility: data.event.visibility
 	};
+
+	let sections: SectionInput[] = data.sections.length
+		? data.sections.map((section) => ({ title: section.title, body: section.body }))
+		: [{ title: t('event.descriptionTitle'), body: '' }];
 
 	let errors: Record<string, string> = {};
 	let isSubmitting = false;
@@ -36,7 +41,11 @@
 
 	// Pre-fill form with values from server on error
 	$: if (form && 'values' in form && form.values) {
-		const values = form.values;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const { sections: submittedSections, ...values } = form.values as any;
+		if (submittedSections?.length) {
+			sections = submittedSections as SectionInput[];
+		}
 		eventData = {
 			...eventData,
 			...values,
@@ -426,6 +435,9 @@
 					{/if}
 
 					<!-- Action Buttons -->
+					<!-- Description + extra sections -->
+					<SectionsEditor bind:sections />
+
 					<div class="flex space-x-3">
 						<button
 							type="button"
