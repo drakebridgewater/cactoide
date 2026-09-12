@@ -1,20 +1,23 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
-	import type { Event, RSVP } from '$lib/types';
+	import type { Comment, Event, RSVP } from '$lib/types';
 	import { goto } from '$app/navigation';
 	import { enhance } from '$app/forms';
 	import { formatTime, formatDate } from '$lib/dateHelpers.js';
 	import CalendarModal from '$lib/components/CalendarModal.svelte';
 	import type { CalendarEvent } from '$lib/calendarHelpers.js';
 	import { t } from '$lib/i18n/i18n.js';
+	import CommentThread from '$lib/components/CommentThread.svelte';
 
-	export let data: { event: Event; rsvps: RSVP[] };
-	type FormDataLocal = { success?: boolean; error?: string; type?: 'add' | 'remove' | 'copy' };
+	export let data: { event: Event; rsvps: RSVP[]; comments: Comment[]; myRsvpName: string };
+	type ActionResultType = 'add' | 'remove' | 'copy' | 'comment-add' | 'comment-remove';
+	type FormDataLocal = { success?: boolean; error?: string; type?: ActionResultType };
 	export let form: FormDataLocal | undefined;
 
 	let event: Event;
 	let rsvps: RSVP[] = [];
+	let comments: Comment[] = [];
 	let newAttendeeName = '';
 	let isAddingRSVP = false;
 	let error = '';
@@ -23,13 +26,14 @@
 	let numberOfGuests = 1;
 	let showCalendarModal = false;
 	let calendarEvent: CalendarEvent;
-	let toastType: 'add' | 'remove' | 'copy' | null = null;
-	let typeToShow: 'add' | 'remove' | 'copy' | undefined;
+	let toastType: ActionResultType | null = null;
+	let typeToShow: ActionResultType | undefined;
 	let successHideTimer: number | null = null;
 
 	// Use server-side data
 	$: event = data.event;
 	$: rsvps = data.rsvps;
+	$: comments = data.comments ?? [];
 	$: isEventCreator = event.is_creator ?? false;
 
 	// Create calendar event object when event data changes
@@ -39,6 +43,7 @@
 			date: event.date,
 			time: event.time,
 			location: event.location,
+			description: event.sections?.[0]?.body,
 			url: `${$page.url.origin}/event/${eventId}`
 		};
 	}
@@ -50,7 +55,11 @@
 	}
 
 	const handleFormSuccess = () => {
-		if (form?.type === 'add') {
+		if (form?.type === 'comment-add') {
+			success = t('event.commentAddedSuccessfully');
+		} else if (form?.type === 'comment-remove') {
+			success = t('event.commentRemovedSuccessfully');
+		} else if (form?.type === 'add') {
 			success = 'RSVP added successfully!';
 		} else {
 			success = 'RSVP removed successfully.';
@@ -348,6 +357,18 @@
 					{/if}
 				</div>
 
+				<!-- Event Sections -->
+				{#if event.sections && event.sections.length > 0}
+					<div class="rounded-sm border p-6 shadow-2xl backdrop-blur-sm">
+						{#each event.sections as section (section.id)}
+							<div class="mb-6 last:mb-0">
+								<h3 class="mb-2 text-xl font-bold">{section.title}</h3>
+								<p class="break-words whitespace-pre-wrap">{section.body}</p>
+							</div>
+						{/each}
+					</div>
+				{/if}
+
 				<!-- Attendees List -->
 				{#if event.visibility !== 'invite-only'}
 					<div class="rounded-sm border p-6 shadow-2xl backdrop-blur-sm">
@@ -442,6 +463,9 @@
 						{/if}
 					</div>
 				{/if}
+
+				<!-- Comments -->
+				<CommentThread {comments} defaultName={data.myRsvpName} />
 
 				<!-- Action Buttons -->
 				<div class="max-w-2xl space-y-3">

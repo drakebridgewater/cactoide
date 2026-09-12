@@ -1,8 +1,9 @@
 <script lang="ts">
-	import type { CreateEventData, EventType, LocationType } from '$lib/types';
+	import type { CreateEventData, EventType, LocationType, SectionInput } from '$lib/types';
 	import { enhance } from '$app/forms';
 	import { goto } from '$app/navigation';
 	import { t } from '$lib/i18n/i18n.js';
+	import SectionsEditor from '$lib/components/SectionsEditor.svelte';
 
 	export let form;
 
@@ -18,6 +19,8 @@
 		visibility: 'public' as 'public' | 'private' | 'invite-only'
 	};
 
+	let sections: SectionInput[] = [{ title: t('event.descriptionTitle'), body: '' }];
+
 	let errors: Record<string, string> = {};
 	let isSubmitting = false;
 
@@ -31,13 +34,17 @@
 
 	// Pre-fill form with values from server on error
 	$: if (form?.values) {
+		const { sections: submittedSections, ...eventValues } = form.values;
 		eventData = {
 			...eventData,
-			...form.values,
+			...eventValues,
 			attendee_limit: form.values.attendee_limit
 				? parseInt(String(form.values.attendee_limit))
 				: undefined
 		};
+		if (submittedSections?.length) {
+			sections = submittedSections;
+		}
 	}
 
 	const handleTypeChange = (type: EventType) => {
@@ -361,6 +368,9 @@
 							</p>
 						</fieldset>
 					</div>
+
+					<!-- Description + extra sections -->
+					<SectionsEditor bind:sections />
 
 					<div class="flex space-x-3">
 						<button

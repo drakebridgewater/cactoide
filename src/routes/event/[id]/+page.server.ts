@@ -1,9 +1,13 @@
 import { database } from '$lib/database/db';
-import { events, rsvps } from '$lib/database/schema';
-import { eq, asc } from 'drizzle-orm';
+import { events, rsvps, eventSections, comments } from '$lib/database/schema';
+import { eq, and, asc } from 'drizzle-orm';
 import { error, fail } from '@sveltejs/kit';
 import type { PageServerLoad, Actions } from './$types';
 import { logger } from '$lib/logger';
+import type { Comment } from '$lib/types';
+
+const MAX_COMMENT_LENGTH = 2000;
+const MAX_COMMENT_AUTHOR_LENGTH = 50;
 
 export const load: PageServerLoad = async ({ params, cookies }) => {
 	const eventId = params.id;
@@ -14,10 +18,20 @@ export const load: PageServerLoad = async ({ params, cookies }) => {
 	}
 
 	try {
-		// Fetch event and RSVPs in parallel
-		const [eventData, rsvpData] = await Promise.all([
+		// Fetch event, RSVPs, sections and comments in parallel
+		const [eventData, rsvpData, sectionData, commentData] = await Promise.all([
 			database.select().from(events).where(eq(events.id, eventId)).limit(1),
-			database.select().from(rsvps).where(eq(rsvps.eventId, eventId)).orderBy(asc(rsvps.createdAt))
+			database.select().from(rsvps).where(eq(rsvps.eventId, eventId)).orderBy(asc(rsvps.createdAt)),
+			database
+				.select()
+				.from(eventSections)
+				.where(eq(eventSections.eventId, eventId))
+				.orderBy(asc(eventSections.position)),
+			database
+				.select()
+				.from(comments)
+				.where(eq(comments.eventId, eventId))
+				.orderBy(asc(comments.createdAt))
 		]);
 
 		if (!eventData[0]) {
@@ -62,9 +76,49 @@ export const load: PageServerLoad = async ({ params, cookies }) => {
 			created_at: rsvp.createdAt?.toISOString() || new Date().toISOString()
 		}));
 
+		const transformedSections = sectionData.map((section) => ({
+			id: section.id,
+			title: section.title,
+			body: section.body,
+			position: section.position
+		}));
+
+		// Flatten to client shape first (dropping user_id, which is the credential),
+		// then nest replies under their parent. The tree is only ever one level deep.
+		const isCreator = transformedEvent.is_creator;
+		const flatComments: Comment[] = commentData.map((comment) => {
+			const isMine = !!userId && comment.userId === userId;
+			return {
+				id: comment.id,
+				event_id: comment.eventId,
+				parent_id: comment.parentId,
+				author_name: comment.authorName,
+				body: comment.body,
+				is_mine: isMine,
+				can_delete: isMine || isCreator,
+				created_at: comment.createdAt?.toISOString() || new Date().toISOString(),
+				replies: []
+			};
+		});
+
+		const byId = new Map(flatComments.map((comment) => [comment.id, comment]));
+		const threadedComments = flatComments.filter((comment) => {
+			if (!comment.parent_id) return true;
+			byId.get(comment.parent_id)?.replies?.push(comment);
+			return false;
+		});
+
+		// Prefill the comment form with this visitor's RSVP name, when they have one
+		const myRsvpName =
+			eventRsvps.find(
+				(rsvp) => !!userId && rsvp.userId === userId && !rsvp.name.includes("'s Guest")
+			)?.name ?? '';
+
 		return {
-			event: transformedEvent,
-			rsvps: transformedRsvps
+			event: { ...transformedEvent, sections: transformedSections },
+			rsvps: transformedRsvps,
+			comments: threadedComments,
+			myRsvpName
 		};
 	} catch (err) {
 		if (err instanceof Response) throw err; // This is the 404 error
@@ -165,6 +219,113 @@ export const actions: Actions = {
 		} catch (err) {
 			logger.error({ error: err, rsvpId }, 'Error removing RSVP');
 			return fail(500, { error: 'Failed to remove RSVP' });
+		}
+	},
+
+	addComment: async ({ request, params, cookies }) => {
+		const eventId = params.id;
+		const formData = await request.formData();
+
+		const body = (formData.get('body') as string)?.trim();
+		const authorName = (formData.get('authorName') as string)?.trim();
+		const parentId = (formData.get('parentId') as string) || null;
+		const userId = cookies.get('cactoideUserId');
+
+		if (!userId) {
+			return fail(401, { error: 'Unauthorized' });
+		}
+		if (!body || !authorName) {
+			return fail(400, { error: 'Name and comment are required' });
+		}
+		if (body.length > MAX_COMMENT_LENGTH) {
+			return fail(400, { error: 'Comment is too long' });
+		}
+
+		try {
+			const [eventData] = await database.select().from(events).where(eq(events.id, eventId));
+			if (!eventData) {
+				return fail(404, { error: 'Event not found' });
+			}
+
+			// Same gate the event page applies: invite-only events are creator-only here
+			if (eventData.visibility === 'invite-only' && eventData.userId !== userId) {
+				return fail(403, { error: 'This event requires an invite link to comment' });
+			}
+
+			// Keep the thread exactly one level deep: a reply must point at a
+			// top-level comment on this same event.
+			let resolvedParentId: string | null = null;
+			if (parentId) {
+				const [parent] = await database
+					.select()
+					.from(comments)
+					.where(and(eq(comments.id, parentId), eq(comments.eventId, eventId)))
+					.limit(1);
+
+				if (!parent) {
+					return fail(400, { error: 'Comment to reply to was not found' });
+				}
+				// Replying to a reply attaches to that reply's parent instead of nesting
+				resolvedParentId = parent.parentId ?? parent.id;
+			}
+
+			await database.insert(comments).values({
+				eventId,
+				parentId: resolvedParentId,
+				authorName: authorName.slice(0, MAX_COMMENT_AUTHOR_LENGTH),
+				body,
+				userId
+			});
+
+			return { success: true, type: 'comment-add' };
+		} catch (err) {
+			logger.error({ error: err, eventId, userId }, 'Error adding comment');
+			return fail(500, { error: 'Failed to post comment' });
+		}
+	},
+
+	deleteComment: async ({ request, params, cookies }) => {
+		const eventId = params.id;
+		const formData = await request.formData();
+
+		const commentId = formData.get('commentId') as string;
+		const userId = cookies.get('cactoideUserId');
+
+		if (!userId) {
+			return fail(401, { error: 'Unauthorized' });
+		}
+		if (!commentId) {
+			return fail(400, { error: 'Comment ID is required' });
+		}
+
+		try {
+			const [comment] = await database
+				.select()
+				.from(comments)
+				.where(and(eq(comments.id, commentId), eq(comments.eventId, eventId)))
+				.limit(1);
+
+			if (!comment) {
+				return fail(404, { error: 'Comment not found' });
+			}
+
+			const [eventData] = await database.select().from(events).where(eq(events.id, eventId));
+
+			// The author may delete their own; the event creator may delete any on
+			// their event. Enforced here, not just hidden in the UI.
+			const isAuthor = comment.userId === userId;
+			const isEventCreator = !!eventData && eventData.userId === userId;
+			if (!isAuthor && !isEventCreator) {
+				return fail(403, { error: 'You can only delete your own comments' });
+			}
+
+			// Replies cascade with their parent via the self-referencing FK
+			await database.delete(comments).where(eq(comments.id, commentId));
+
+			return { success: true, type: 'comment-remove' };
+		} catch (err) {
+			logger.error({ error: err, eventId, commentId }, 'Error deleting comment');
+			return fail(500, { error: 'Failed to delete comment' });
 		}
 	}
 };

@@ -74,4 +74,32 @@ SELECT
 FROM counts c
 JOIN LATERAL generate_series(1, c.rsvp_count) AS g ON TRUE;
 
+-- -----------------------------
+-- Seed sections and comments for a handful of events
+-- -----------------------------
+WITH sampled AS (
+  SELECT id FROM events WHERE visibility = 'public' ORDER BY id LIMIT 10
+)
+INSERT INTO event_sections (event_id, title, body, position, created_at, updated_at)
+SELECT s.id, v.title, v.body, v.position, NOW(), NOW()
+FROM sampled s
+CROSS JOIN (VALUES
+  ('Description', E'Come join us for an evening of good company.\n\nDoors open half an hour before we start.', 0),
+  ('What to bring', 'A dish to share and your favourite drink.', 1),
+  ('Parking', 'Street parking is free after 18:00. There is a paid garage one block north.', 2)
+) AS v(title, body, position);
+
+WITH sampled AS (
+  SELECT id FROM events WHERE visibility = 'public' ORDER BY id LIMIT 5
+),
+top_level AS (
+  INSERT INTO comments (event_id, parent_id, author_name, body, user_id, created_at)
+  SELECT s.id, NULL, 'Rita', 'Is there anywhere nearby to park?', 'user_seed_1', NOW()
+  FROM sampled s
+  RETURNING id, event_id
+)
+INSERT INTO comments (event_id, parent_id, author_name, body, user_id, created_at)
+SELECT t.event_id, t.id, 'Host', 'Yes — see the Parking section above!', 'user_seed_2', NOW()
+FROM top_level t;
+
 COMMIT;

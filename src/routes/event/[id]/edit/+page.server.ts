@@ -1,9 +1,10 @@
 import { database } from '$lib/database/db';
-import { events, inviteTokens } from '$lib/database/schema';
-import { eq, and } from 'drizzle-orm';
+import { events, eventSections, inviteTokens } from '$lib/database/schema';
+import { eq, and, asc } from 'drizzle-orm';
 import { fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { logger } from '$lib/logger';
+import { parseSections, toSectionRows } from '$lib/sectionHelpers';
 
 export const load: PageServerLoad = async ({ params, cookies }) => {
 	const eventId = params.id;
@@ -23,6 +24,13 @@ export const load: PageServerLoad = async ({ params, cookies }) => {
 	if (event.length === 0) {
 		throw redirect(303, '/event');
 	}
+
+	// Fetch the event's sections in display order
+	const sections = await database
+		.select()
+		.from(eventSections)
+		.where(eq(eventSections.eventId, eventId))
+		.orderBy(asc(eventSections.position));
 
 	// Fetch invite token if this is an invite-only event
 	let inviteToken = null;
@@ -50,6 +58,12 @@ export const load: PageServerLoad = async ({ params, cookies }) => {
 
 	return {
 		event: eventRow,
+		sections: sections.map((section) => ({
+			id: section.id,
+			title: section.title,
+			body: section.body,
+			position: section.position
+		})),
 		inviteToken
 	};
 };
@@ -84,6 +98,7 @@ export const actions: Actions = {
 		const type = formData.get('type') as 'limited' | 'unlimited';
 		const attendeeLimit = formData.get('attendee_limit') as string;
 		const visibility = formData.get('visibility') as 'public' | 'private';
+		const sections = parseSections(formData);
 
 		// Validation
 		const missingFields: string[] = [];
@@ -107,7 +122,8 @@ export const actions: Actions = {
 					location_url: locationUrl,
 					type,
 					attendee_limit: attendeeLimit,
-					visibility
+					visibility,
+					sections
 				}
 			});
 		}
@@ -130,7 +146,8 @@ export const actions: Actions = {
 					location_url: locationUrl,
 					type,
 					attendee_limit: attendeeLimit,
-					visibility
+					visibility,
+					sections
 				}
 			});
 		}
@@ -147,30 +164,43 @@ export const actions: Actions = {
 					location_url: locationUrl,
 					type,
 					attendee_limit: attendeeLimit,
-					visibility
+					visibility,
+					sections
 				}
 			});
 		}
-		// Update the event
-		await database
-			.update(events)
-			.set({
-				name: name.trim(),
-				date: date,
-				time: time,
-				location: location?.trim() || '',
-				locationType: locationType as 'none' | 'text' | 'maps',
-				locationUrl: locationType === 'maps' ? locationUrl?.trim() : null,
-				type: type,
-				attendeeLimit: type === 'limited' ? parseInt(attendeeLimit) : null,
-				visibility: visibility,
-				updatedAt: new Date()
-			})
-			.where(and(eq(events.id, eventId), eq(events.userId, userId)))
-			.catch((error) => {
-				logger.error({ error, eventId, userId }, 'Unexpected error updating event');
-				throw error;
+		// Update the event and replace its sections in one transaction. Sections
+		// carry no child rows, so replacing them wholesale is simpler and safer
+		// than diffing, and it keeps positions dense.
+		try {
+			await database.transaction(async (tx) => {
+				await tx
+					.update(events)
+					.set({
+						name: name.trim(),
+						date: date,
+						time: time,
+						location: location?.trim() || '',
+						locationType: locationType as 'none' | 'text' | 'maps',
+						locationUrl: locationType === 'maps' ? locationUrl?.trim() : null,
+						type: type,
+						attendeeLimit: type === 'limited' ? parseInt(attendeeLimit) : null,
+						visibility: visibility,
+						updatedAt: new Date()
+					})
+					.where(and(eq(events.id, eventId), eq(events.userId, userId)));
+
+				await tx.delete(eventSections).where(eq(eventSections.eventId, eventId));
+
+				const sectionRows = toSectionRows(eventId, sections, 'Description');
+				if (sectionRows.length > 0) {
+					await tx.insert(eventSections).values(sectionRows);
+				}
 			});
+		} catch (error) {
+			logger.error({ error, eventId, userId }, 'Unexpected error updating event');
+			throw error;
+		}
 
 		throw redirect(303, `/event/${eventId}`);
 	}

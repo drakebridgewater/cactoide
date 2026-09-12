@@ -23,8 +23,11 @@ const transport = USE_PRETTY_LOGS
 		}
 	: undefined;
 
+// `||`, not `??`: CI passes `LOG_LEVEL: ${{ vars.LOG_LEVEL }}`, and an undefined
+// repository variable expands to an empty string rather than being left unset.
+// `??` lets that through and pino rejects '' as a level, failing the build.
 export const logger = pino({
-	level: env.LOG_LEVEL ?? 'info',
+	level: env.LOG_LEVEL || 'info',
 	transport
 });
 

@@ -1,9 +1,10 @@
 import { database } from '$lib/database/db';
-import { events, inviteTokens } from '$lib/database/schema';
+import { events, eventSections, inviteTokens } from '$lib/database/schema';
 import { fail, redirect } from '@sveltejs/kit';
 import type { Actions } from './$types';
 import { generateInviteToken, calculateTokenExpiration } from '$lib/inviteTokenHelpers.js';
 import { logger } from '$lib/logger';
+import { parseSections, toSectionRows } from '$lib/sectionHelpers';
 
 // Generate a random URL-friendly ID
 function generateEventId(): string {
@@ -29,6 +30,7 @@ export const actions: Actions = {
 		const attendeeLimit = formData.get('attendee_limit') as string;
 		const visibility = formData.get('visibility') as 'public' | 'private' | 'invite-only';
 		const userId = cookies.get('cactoideUserId');
+		const sections = parseSections(formData);
 
 		// Validation
 		const missingFields: string[] = [];
@@ -53,7 +55,8 @@ export const actions: Actions = {
 					location_url: locationUrl,
 					type,
 					attendee_limit: attendeeLimit,
-					visibility
+					visibility,
+					sections
 				}
 			});
 		}
@@ -76,7 +79,8 @@ export const actions: Actions = {
 					location_url: locationUrl,
 					type,
 					attendee_limit: attendeeLimit,
-					visibility
+					visibility,
+					sections
 				}
 			});
 		}
@@ -93,50 +97,49 @@ export const actions: Actions = {
 					location_url: locationUrl,
 					type,
 					attendee_limit: attendeeLimit,
-					visibility
+					visibility,
+					sections
 				}
 			});
 		}
 
 		const eventId = generateEventId();
 
-		// Create the event
-		await database
-			.insert(events)
-			.values({
-				id: eventId,
-				name: name.trim(),
-				date: date,
-				time: time,
-				location: location?.trim() || '',
-				locationType: locationType,
-				locationUrl: locationType === 'maps' ? locationUrl?.trim() : null,
-				type: type,
-				attendeeLimit: type === 'limited' ? parseInt(attendeeLimit) : null,
-				visibility: visibility,
-				userId: userId!
-			})
-			.catch((error) => {
-				logger.error({ error, eventId, userId }, 'Unexpected error creating event');
-				throw error;
-			});
-
-		// Generate invite token for invite-only events
-		if (visibility === 'invite-only') {
-			const token = generateInviteToken();
-			const expiresAt = calculateTokenExpiration(date, time);
-
-			await database
-				.insert(inviteTokens)
-				.values({
-					eventId: eventId,
-					token: token,
-					expiresAt: new Date(expiresAt)
-				})
-				.catch((error) => {
-					console.error('Error creating invite token', error);
-					throw error;
+		// Create the event, its sections and its invite token together, so a
+		// partially-created event can never be left behind.
+		try {
+			await database.transaction(async (tx) => {
+				await tx.insert(events).values({
+					id: eventId,
+					name: name.trim(),
+					date: date,
+					time: time,
+					location: location?.trim() || '',
+					locationType: locationType,
+					locationUrl: locationType === 'maps' ? locationUrl?.trim() : null,
+					type: type,
+					attendeeLimit: type === 'limited' ? parseInt(attendeeLimit) : null,
+					visibility: visibility,
+					userId: userId!
 				});
+
+				const sectionRows = toSectionRows(eventId, sections, 'Description');
+				if (sectionRows.length > 0) {
+					await tx.insert(eventSections).values(sectionRows);
+				}
+
+				// Generate invite token for invite-only events
+				if (visibility === 'invite-only') {
+					await tx.insert(inviteTokens).values({
+						eventId: eventId,
+						token: generateInviteToken(),
+						expiresAt: new Date(calculateTokenExpiration(date, time))
+					});
+				}
+			});
+		} catch (error) {
+			logger.error({ error, eventId, userId }, 'Unexpected error creating event');
+			throw error;
 		}
 
 		throw redirect(303, `/event/${eventId}`);

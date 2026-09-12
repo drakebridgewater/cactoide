@@ -14,11 +14,37 @@ export interface Event {
 	type: EventType;
 	attendee_limit?: number;
 	visibility: EventVisibility;
+	sections?: EventSection[];
 	is_creator?: boolean; // Optional: absent on events fetched from federated instances
 	created_at: string;
 	updated_at: string;
 	federation?: boolean; // Optional: true if event is from a federated instance
 	federation_url?: string; // Optional: URL of the federated instance this event came from
+}
+
+export interface EventSection {
+	id: string;
+	title: string;
+	body: string;
+	position: number;
+}
+
+/** A section as it travels through a form, before it has an id. */
+export interface SectionInput {
+	title: string;
+	body: string;
+}
+
+export interface Comment {
+	id: string;
+	event_id: string;
+	parent_id: string | null;
+	author_name: string;
+	body: string;
+	is_mine: boolean;
+	can_delete: boolean;
+	created_at: string;
+	replies?: Comment[]; // Only populated on top-level comments
 }
 
 export interface RSVP {
